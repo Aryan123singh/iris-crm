@@ -1,0 +1,125 @@
+export const API_URL = import.meta.env.VITE_API_URL || "http://localhost:8000";
+
+const TOKEN_KEY = "aurelia_token";
+const USER_KEY = "aurelia_user";
+
+export const getToken = () => localStorage.getItem(TOKEN_KEY) || "";
+
+export function setSession(token, user) {
+  if (token) localStorage.setItem(TOKEN_KEY, token);
+  if (user) localStorage.setItem(USER_KEY, JSON.stringify(user));
+  window.dispatchEvent(new Event("aurelia:user"));
+}
+
+export function clearSession() {
+  localStorage.removeItem(TOKEN_KEY);
+  localStorage.removeItem(USER_KEY);
+  window.dispatchEvent(new Event("aurelia:user"));
+}
+
+export function cachedUser() {
+  try {
+    return JSON.parse(localStorage.getItem(USER_KEY) || "null");
+  } catch {
+    return null;
+  }
+}
+
+export const getModel = () => localStorage.getItem("aurelia_ai_model") || "";
+export function setModel(model) {
+  if (model) localStorage.setItem("aurelia_ai_model", model);
+  else localStorage.removeItem("aurelia_ai_model");
+  window.dispatchEvent(new Event("aurelia:model"));
+}
+
+async function request(path, options = {}) {
+  const headers = { ...(options.headers || {}) };
+  const token = getToken();
+  if (token) headers.Authorization = `Bearer ${token}`;
+  const model = getModel();
+  if (model) headers["X-AI-Model"] = model;
+
+  let res;
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), 95000); // free-tier cold starts
+  try {
+    res = await fetch(`${API_URL}${path}`, { ...options, headers, signal: ctrl.signal });
+  } catch {
+    throw new Error(`Cannot reach the CRM API at ${API_URL}. Is the backend running?`);
+  } finally {
+    clearTimeout(timer);
+  }
+  if (!res.ok) {
+    let detail = "";
+    try {
+      const body = await res.json();
+      detail = typeof body.detail === "string" ? body.detail : JSON.stringify(body.detail);
+    } catch {
+      /* non-JSON error body */
+    }
+    throw new Error(detail || `${res.status} ${res.statusText}`);
+  }
+  if (res.status === 204 || res.headers.get("content-length") === "0") return null;
+  return res.json();
+}
+
+// Poll /health until the (possibly sleeping) free-tier backend wakes up. Used
+// by the boot splash so a cold start never shows a broken first screen.
+export async function wakeBackend({ onAttempt, timeoutMs = 120000 } = {}) {
+  const deadline = Date.now() + timeoutMs;
+  let attempt = 0;
+  while (Date.now() < deadline) {
+    attempt += 1;
+    onAttempt?.(attempt);
+    try {
+      const ctrl = new AbortController();
+      const t = setTimeout(() => ctrl.abort(), 90000);
+      const res = await fetch(`${API_URL}/health`, { signal: ctrl.signal });
+      clearTimeout(t);
+      if (res.ok) return true;
+    } catch {
+      /* still waking */
+    }
+    await new Promise((r) => setTimeout(r, 2500));
+  }
+  return false;
+}
+
+export const api = {
+  get: (path) => request(path),
+  post: (path, body) =>
+    request(path, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    }),
+  put: (path, body) =>
+    request(path, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    }),
+  // multipart upload — the browser sets the boundary header itself
+  postForm: (path, formData) =>
+    request(path, { method: "POST", body: formData }),
+  del: (path) => request(path, { method: "DELETE" }),
+};
+
+export const inr = (n) =>
+  new Intl.NumberFormat("en-IN", {
+    style: "currency",
+    currency: "INR",
+    maximumFractionDigits: 0,
+  }).format(n ?? 0);
+
+export const pct = (x) => `${((x ?? 0) * 100).toFixed(1)}%`;
+
+export const fmtDate = (s) =>
+  s
+    ? new Date(s.endsWith?.("Z") || s.includes?.("+") ? s : s + "Z").toLocaleString("en-IN", {
+        day: "numeric",
+        month: "short",
+        hour: "2-digit",
+        minute: "2-digit",
+      })
+    : "—";

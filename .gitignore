@@ -1,0 +1,13 @@
+__pycache__/
+*.pyc
+.venv/
+mcp-server/.venv/
+.env
+crm.db
+backend/uploads/
+.claude/
+.pytest_cache/
+node_modules/
+dist/
+
+COMMIT_MSG.tmp

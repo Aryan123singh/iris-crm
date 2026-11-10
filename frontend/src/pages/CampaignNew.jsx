@@ -1,0 +1,265 @@
+import { useEffect, useMemo, useRef, useState } from "react";
+import { Link, useNavigate, useSearchParams } from "react-router-dom";
+import { Sparkles } from "lucide-react";
+import { api } from "../api.js";
+import { usePageTitle } from "../App.jsx";
+import { useToast } from "../components/Toast.jsx";
+import Modal from "../components/Modal.jsx";
+import { humanizeRules } from "../components/RuleEditor.jsx";
+
+const TOKENS = ["{{first_name}}", "{{name}}", "{{city}}"];
+const CHANNELS = ["whatsapp", "sms", "email", "rcs"];
+
+export default function CampaignNew({ aiEnabled }) {
+  usePageTitle("New campaign");
+  const [params] = useSearchParams();
+  const navigate = useNavigate();
+  const toast = useToast();
+
+  const [segments, setSegments] = useState(null);
+  const [name, setName] = useState(params.get("name") || "");
+  const [segmentId, setSegmentId] = useState(params.get("segment") || "");
+  const [channel, setChannel] = useState("whatsapp");
+  const [template, setTemplate] = useState("");
+  const [audience, setAudience] = useState(null);
+  const [suggested, setSuggested] = useState(null); // data-driven channel hint
+
+  const [objective, setObjective] = useState(params.get("objective") || "");
+  const [drafting, setDrafting] = useState(false);
+  const [variants, setVariants] = useState([]);
+
+  const [error, setError] = useState("");
+  const [submitting, setSubmitting] = useState(false);
+  const [confirming, setConfirming] = useState(false);
+  const templateRef = useRef(null);
+
+  useEffect(() => {
+    api.get("/api/segments").then((r) => {
+      setSegments(r.segments);
+      // Preselect the only/linked segment for a one-less-click flow.
+      if (!params.get("segment") && r.segments.length === 1) setSegmentId(r.segments[0].id);
+    }).catch((e) => setError(e.message));
+
+    // Recommend the channel with the best click rate so far — decision
+    // support from the brand's own history, not a hardcoded default.
+    api.get("/api/campaigns").then((r) => {
+      const best = r.campaigns
+        .filter((c) => c.stats.funnel.sent >= 50)
+        .sort((a, b) => b.stats.click_rate - a.stats.click_rate)[0];
+      if (best) setSuggested({ channel: best.channel, rate: best.stats.click_rate });
+    }).catch(() => {});
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
+
+  const segment = useMemo(
+    () => segments?.find((s) => s.id === segmentId),
+    [segments, segmentId]
+  );
+
+  // Audience size for the selected segment, via the same preview endpoint
+  // the audience builder uses (rules are data, so this is free).
+  useEffect(() => {
+    setAudience(null);
+    if (!segment) return;
+    api.post("/api/segments/preview", { rules: segment.rules })
+      .then((p) => setAudience(p.count))
+      .catch(() => {});
+  }, [segment]);
+
+  const draftWithAI = async () => {
+    setDrafting(true);
+    setError("");
+    try {
+      const res = await api.post("/api/ai/draft", {
+        objective: objective || name || "Re-engage this audience",
+        audience_description: segment?.description || segment?.name || "",
+        channel,
+      });
+      setVariants(res.variants || []);
+    } catch (e) {
+      toast(e.message, "error");
+    } finally {
+      setDrafting(false);
+    }
+  };
+
+  const insertToken = (tok) => {
+    const el = templateRef.current;
+    if (!el) return setTemplate(template + tok);
+    const start = el.selectionStart ?? template.length;
+    const end = el.selectionEnd ?? template.length;
+    setTemplate(template.slice(0, start) + tok + template.slice(end));
+  };
+
+  const create = async (launch) => {
+    setSubmitting(true);
+    try {
+      const res = await api.post("/api/campaigns", {
+        name,
+        segment_id: segmentId,
+        channel,
+        message_template: template,
+      });
+      if (launch) {
+        await api.post(`/api/campaigns/${res.id}/launch`, {});
+        toast(`Campaign launched to ${res.audience_size} customers`, "success");
+      } else {
+        toast("Campaign saved as draft", "success");
+      }
+      navigate(`/campaigns/${res.id}`);
+    } catch (e) {
+      toast(e.message, "error");
+      setSubmitting(false);
+      setConfirming(false);
+    }
+  };
+
+  const ready = name.trim() && segmentId && template.trim();
+  const previewText = template
+    .replaceAll("{{first_name}}", "Asha")
+    .replaceAll("{{name}}", "Asha Mehta")
+    .replaceAll("{{city}}", "Mumbai");
+
+  return (
+    <>
+      <div className="page-head">
+        <div>
+          <h1>New campaign</h1>
+          <p>Pick an audience, write or AI-draft the message, review the summary, then launch.</p>
+        </div>
+      </div>
+
+      {error && <div className="error-banner">{error}</div>}
+
+      <div className="panel" style={{ marginTop: 0 }}>
+        <div className="row">
+          <label className="field">
+            <span>Campaign name</span>
+            <input value={name} placeholder="e.g. June win-back" onChange={(e) => setName(e.target.value)} />
+          </label>
+          <label className="field">
+            <span>Audience</span>
+            <select value={segmentId} onChange={(e) => setSegmentId(e.target.value)}>
+              <option value="">— choose —</option>
+              {segments?.map((s) => (
+                <option key={s.id} value={s.id}>{s.name}</option>
+              ))}
+            </select>
+          </label>
+          <label className="field">
+            <span>Channel</span>
+            <select value={channel} onChange={(e) => setChannel(e.target.value)}>
+              {CHANNELS.map((c) => (
+                <option key={c} value={c}>
+                  {c}{suggested?.channel === c ? " — recommended" : ""}
+                </option>
+              ))}
+            </select>
+          </label>
+        </div>
+
+        {suggested && (
+          <p className="hint" style={{ marginTop: -2 }}>
+            Recommended channel: <strong>{suggested.channel}</strong> — your best click rate so far ({(suggested.rate * 100).toFixed(1)}%).
+          </p>
+        )}
+
+        {segments !== null && segments.length === 0 && (
+          <p className="hint">
+            No audiences yet — <Link to="/segments">create one first</Link>.
+          </p>
+        )}
+
+        {segment && (
+          <p className="hint" style={{ marginTop: 0 }}>
+            <code className="rules">{humanizeRules(segment.rules)}</code>
+            {" · "}
+            {audience === null ? "counting…" : <strong>{audience.toLocaleString("en-IN")} customers will receive this</strong>}
+          </p>
+        )}
+      </div>
+
+      <div className="panel">
+        <h2>Message</h2>
+
+        {aiEnabled && (
+          <>
+            <div className="row" style={{ marginBottom: 12 }}>
+              <input
+                aria-label="Campaign objective for AI drafting"
+                placeholder='Objective, e.g. "bring lapsed customers back with 10% off"'
+                value={objective}
+                onChange={(e) => setObjective(e.target.value)}
+              />
+              <button className="ai-action shrink" disabled={drafting} onClick={draftWithAI}>
+                <Sparkles size={14} /> {drafting ? "Drafting…" : "Draft with AI"}
+              </button>
+            </div>
+            {variants.length > 0 && (
+              <div className="variants" style={{ marginBottom: 14 }}>
+                {variants.map((v, i) => (
+                  <div key={i} className="variant">
+                    <span className="label"><Sparkles size={12} /> {v.label}</span>
+                    <p>{v.content}</p>
+                    <button onClick={() => { setTemplate(v.content); toast(`Using "${v.label}"`, "info"); }}>
+                      Use this
+                    </button>
+                  </div>
+                ))}
+              </div>
+            )}
+          </>
+        )}
+
+        <label className="field">
+          <span>Template — tokens are personalised per recipient at send time</span>
+          <textarea
+            ref={templateRef}
+            rows={4}
+            value={template}
+            placeholder="Hi {{first_name}}, we miss you! Here's 10% off your next order."
+            onChange={(e) => setTemplate(e.target.value)}
+          />
+        </label>
+        <div className="token-chips" aria-label="Insert personalisation token">
+          {TOKENS.map((t) => (
+            <button key={t} onClick={() => insertToken(t)}>{t}</button>
+          ))}
+        </div>
+
+        <div className="row" style={{ marginTop: 18, justifyContent: "flex-end" }}>
+          <div className="shrink" style={{ display: "flex", gap: 8 }}>
+            <button disabled={!ready || submitting} onClick={() => create(false)}>Save as draft</button>
+            <button className="primary" disabled={!ready || submitting} onClick={() => setConfirming(true)}>
+              Review & launch
+            </button>
+          </div>
+        </div>
+      </div>
+
+      {confirming && (
+        <Modal
+          title="Launch this campaign?"
+          onClose={() => !submitting && setConfirming(false)}
+          footer={
+            <>
+              <button className="ghost" disabled={submitting} onClick={() => setConfirming(false)}>Cancel</button>
+              <button className="primary" disabled={submitting} onClick={() => create(true)}>
+                {submitting ? "Launching…" : `Launch to ${audience ?? "?"} customers`}
+              </button>
+            </>
+          }
+        >
+          <ul className="confirm-list">
+            <li><span className="k">Campaign</span><span className="v">{name}</span></li>
+            <li><span className="k">Audience</span><span className="v">{segment?.name} · {audience ?? "?"} customers</span></li>
+            <li><span className="k">Channel</span><span className="v">{channel}</span></li>
+          </ul>
+          <div className="message-preview">{previewText}</div>
+          <p className="hint" style={{ marginBottom: 0 }}>
+            Preview shown for a sample recipient. Sending starts immediately and can’t be undone.
+          </p>
+        </Modal>
+      )}
+    </>
+  );
+}
